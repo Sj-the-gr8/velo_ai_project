@@ -1,6 +1,10 @@
 from __future__ import annotations
 
+import base64
+from datetime import datetime, timezone
+from email import policy
 from email.message import Message
+from email.parser import BytesParser
 from html import unescape
 import re
 
@@ -27,3 +31,15 @@ def extract_plain_text(message: Message) -> str:
         elif part.get_content_type() == "text/html":
             html.append(text)
     return "\n".join(plain).strip() or _strip_html("\n".join(html))
+
+
+def parse_gmail_message(resource: dict) -> dict:
+    """Parse a users.messages.get(format="raw") resource into id, received date and plain text."""
+    message = BytesParser(policy=policy.default).parsebytes(base64.urlsafe_b64decode(resource["raw"]))
+    internal_date = int(resource["internalDate"])
+    return {
+        "message_id": resource["id"],
+        "internal_date": internal_date,
+        "received_date": datetime.fromtimestamp(internal_date / 1000, timezone.utc).isoformat(),
+        "body": extract_plain_text(message),
+    }

@@ -68,9 +68,10 @@ It has two phases:
 | `agent/mock_site/app.py` | Flask sandbox cancellation flow with dark patterns |
 | `agent/som_overlay.js` | Set-of-Marks overlay that numbers visible interactive elements |
 | `agent/vision_agent.py` | Playwright loop: overlay, screenshot, Gemini choice, click, log |
+| `agent/sandbox.py` | Starts the local mock site for an agent run if it is not already running |
 | `agent/action_log.py` | Writes each agent step to the `agent_actions` table |
 | `scripts/run_pipeline_once.py` | End-to-end Phase 1 run |
-| `rules/test_trigger_engine.py`, `tests/test_db.py` | Test suite |
+| `rules/test_trigger_engine.py`, `tests/` | Test suite |
 
 ## Requirements
 
@@ -112,18 +113,20 @@ https://www.googleapis.com/auth/gmail.readonly
 
 What one run does:
 
-1. **Fetch.** Searches Gmail for `receipt OR invoice OR subscription OR trial` after a start time. The first run looks back `GMAIL_LOOKBACK_DAYS` (default 90). Later runs continue from the timestamp saved in `.velo_gmail_cursor`.
+1. **Fetch.** Searches Gmail for `receipt OR invoice OR subscription OR trial` after a start time. The first run looks back `GMAIL_LOOKBACK_DAYS` (default 90). Later runs continue from the Gmail `internalDate` of the last processed message, saved in `.velo_gmail_cursor`. Messages are processed oldest first, and the cursor advances only after each one is handled, so a crashed run picks up where it stopped.
 2. **Parse.** Pulls a plain-text body out of each MIME message.
 3. **Extract.** Sends the body to `gemini-2.5-flash` with a prompt that treats the email as untrusted input. The JSON reply is validated against `BillingEvent`. Anything that fails parsing or validation is logged and skipped, never guessed.
 4. **Store.** Upserts the subscription by `canonical_id` and inserts the billing event. `message_id` is unique, so re-running is idempotent.
-5. **Evaluate.** Rebuilds that subscription's history and runs `evaluate_subscription`.
-6. **Notify.** If there is a new alert, and no open alert with the same reason already exists, it saves the alert and shows a desktop notification. Clicking it starts Phase 2.
+5. **Evaluate.** After all messages are stored, rebuilds each affected subscription's full history and runs `evaluate_subscription` once per subscription.
+6. **Notify.** Saves any new alert (skipping ones that already have an open alert with the same reason), then shows a desktop notification per alert and waits up to `NOTIFY_CLICK_TIMEOUT` seconds. Clicking one starts the mock site if it is not already running and runs Phase 2 against it. Without a click, nothing runs.
 
 ### View the dashboard
 
 ```bash
-streamlit run dashboard/app.py
+streamlit run dashboard/app.py --server.address 127.0.0.1
 ```
+
+The `--server.address` flag keeps the dashboard on this machine. Streamlit binds to every network interface by default, which would expose your billing data to the local network.
 
 The dashboard is read-only and shows:
 
@@ -150,7 +153,7 @@ It serves "Acme Video" at `http://127.0.0.1:5000`, with the kind of obstacles re
 - A retention modal offering a discount, with "Keep my membership" as the prominent button
 - A final confirmation page with "Confirm" and "Go back" side by side
 
-Run the agent in a second terminal:
+Run the agent in a second terminal (a notification click does both steps for you):
 
 ```bash
 python -c "from agent.vision_agent import run_agent; print(run_agent())"
@@ -159,16 +162,16 @@ python -c "from agent.vision_agent import run_agent; print(run_agent())"
 A headed Chromium window opens, and each step does the following:
 
 1. Checks the page is still on the configured mock origin, and aborts if not.
-2. Injects `som_overlay.js`, which puts a numbered badge on every visible link, button, or input.
-3. Takes a screenshot.
-4. Asks Gemini vision for the one numbered label that moves toward cancellation, as `{"label": int | null, "reasoning": str}`.
-5. Logs the step (run id, step number, screenshot path, label, reasoning) to `agent_actions`.
-6. Clicks the element with that label. It stops on `null`, an unknown label, reaching `/cancelled`, or after `AGENT_MAX_STEPS`.
+2. **Perceive.** Injects `som_overlay.js`, which puts a numbered badge on every link, button, or input that is in the viewport and not covered by something else, and returns a registry mapping each label to a selector. Then it takes a screenshot.
+3. **Reason.** Sends the screenshot, the goal, the valid labels, and the history of earlier steps to Gemini vision, which must answer `{"action": "click" | "dismiss_modal", "label": int, "reasoning": str}`. The answer is validated against a schema.
+4. **Act.** Clicks the element that the registry maps to that label.
+5. Logs every step (run id, step number, screenshot path, label, action, reasoning) to `agent_actions`. An invalid response, a label that is not on the page, or a click that fails is logged as a failed step (`invalid_response`, `failed_label`, `failed_click`), and perception runs again.
+6. Ends early once the page says the membership is cancelled, or stops after `AGENT_MAX_STEPS` in any case. A final row with action `success` or `stopped` records the outcome.
 
 `run_agent()` returns the `run_id`. Screenshots go to `agent_screenshots/`. To audit a run:
 
 ```sql
-SELECT step_number, chosen_element_label, reasoning_text, screenshot_path
+SELECT step_number, chosen_element_label, action, reasoning_text, screenshot_path
 FROM agent_actions WHERE run_id = '<run_id>' ORDER BY step_number;
 ```
 
@@ -197,7 +200,7 @@ Price decreases, non-monthly gaps, single ordinary receipts, and steady subscrip
 | `subscriptions` | `canonical_id` (unique), `merchant_name`, `current_amount` (> 0), `currency`, `cadence`, `status`, `first_seen`, `last_seen` |
 | `billing_events` | `subscription_id` → `subscriptions`, `message_id` (unique), `amount` (> 0), `billing_date`, `received_date`, `raw_snippet` |
 | `alerts` | `subscription_id`, `reason` in (`price_hike`, `dormant`, `trial_convert`), `created_at`, `resolved` |
-| `agent_actions` | `run_id`, `step_number`, `screenshot_path`, `chosen_element_label`, `reasoning_text`, `timestamp` |
+| `agent_actions` | `run_id`, `step_number`, `screenshot_path`, `chosen_element_label`, `action`, `reasoning_text`, `timestamp` |
 
 Foreign keys are enforced (`PRAGMA foreign_keys = ON`). The schema is in `db/schema.sql` and is applied by `Database.migrate()`.
 
@@ -217,6 +220,7 @@ All settings come from `.env` (see `.env.example`):
 | `MOCK_SITE_URL` | `http://127.0.0.1:5000` | The only origin the agent may visit |
 | `AGENT_MAX_STEPS` | `8` | Hard cap on agent steps |
 | `AGENT_SCREENSHOT_DIR` | `agent_screenshots` | Where step screenshots are saved |
+| `NOTIFY_CLICK_TIMEOUT` | `120` | Seconds the pipeline waits for a notification click |
 
 ## Tests
 
@@ -224,15 +228,15 @@ All settings come from `.env` (see `.env.example`):
 pytest -q
 ```
 
-There are 10 tests, and all pass. They cover:
+There are 44 tests, and all pass. They cover:
 
-- Price hike after a recurring history
-- Dormant after six cycles, and a usage signal suppressing it
-- Trial conversion on a first receipt
-- Steady subscriptions, single receipts, and price decreases producing no alert
-- Rounding within tolerance
-- Non-monthly cadence boundaries
-- Schema migration creating all four tables
+- Every alert rule, including boundaries: tolerance, cadence, unordered history, precedence, and trial wording
+- MIME parsing: plain-text preference, HTML fallback, attachments, raw Gmail resources
+- Extraction validation: bad JSON, blocked responses, out-of-range amounts, blank merchants, bad dates and currencies, all logged with the message id
+- The pipeline on synthetic mail: stored rows, cursor advance, idempotent re-runs, out-of-order mail, and the notification-to-agent handoff
+- Notifications: the agent starts only after a click
+- Schema migration, including adding the `action` column to older databases
+- The agent end-to-end in headless Chromium against the mock site, using a scripted model: recovery from invalid output and unknown labels, a completed cancellation, and the step cap
 
 The Gemini calls in `extract_billing_event` and `_ask_vision` accept an injected `client`, so they can be tested with a stub instead of the live API.
 

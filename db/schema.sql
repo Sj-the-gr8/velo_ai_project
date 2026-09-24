@@ -36,6 +36,7 @@ CREATE TABLE IF NOT EXISTS agent_actions (
     step_number INTEGER NOT NULL,
     screenshot_path TEXT NOT NULL,
     chosen_element_label TEXT,
+    action TEXT,
     reasoning_text TEXT NOT NULL,
     timestamp TEXT NOT NULL
 );

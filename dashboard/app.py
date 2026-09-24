@@ -5,10 +5,13 @@ import pandas as pd
 import streamlit as st
 
 from config import settings
+from db.db import Database
 
 st.set_page_config(page_title="Velo", page_icon="V", layout="wide")
 st.title("Velo subscription review")
 
+# Create empty tables on a fresh install so the page renders before the first pipeline run.
+Database(settings.database_path).migrate()
 connection = sqlite3.connect(settings.database_path)
 try:
     subscriptions = pd.read_sql_query("SELECT * FROM subscriptions ORDER BY merchant_name", connection)
@@ -42,5 +45,7 @@ st.subheader("Cost over time")
 if events.empty:
     st.info("Billing events will appear here after ingestion.")
 else:
-    chart = events.assign(billing_date=pd.to_datetime(events["billing_date"])).pivot_table(index="billing_date", columns="merchant_name", values="amount", aggfunc="sum").fillna(0)
+    # Bucket by month so a merchant reads as 0 only in months with no charge, not on every day between charges.
+    month = pd.to_datetime(events["billing_date"]).dt.to_period("M").dt.to_timestamp()
+    chart = events.assign(month=month).pivot_table(index="month", columns="merchant_name", values="amount", aggfunc="sum").fillna(0)
     st.line_chart(chart)

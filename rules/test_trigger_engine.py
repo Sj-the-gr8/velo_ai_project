@@ -54,3 +54,31 @@ def test_non_monthly_history_is_not_recurring():
 
 # Keep the expected value readable without importing implementation internals.
 from rules.trigger_engine import Alert
+
+
+def test_empty_history_is_not_flagged():
+    assert evaluate_subscription([]) is None
+
+
+def test_unordered_history_is_sorted_before_evaluation():
+    history = [record(amount=120, days=60), record(amount=100, days=0), record(amount=100, days=30)]
+    assert evaluate_subscription(history) == Alert(AlertReason.PRICE_HIKE, "sub-1")
+
+
+def test_price_hike_takes_precedence_over_dormant():
+    history = [record(amount=100, days=30 * index) for index in range(5)] + [record(amount=130, days=150)]
+    assert evaluate_subscription(history) == Alert(AlertReason.PRICE_HIKE, "sub-1")
+
+
+def test_trial_language_on_later_receipts_is_not_trial_convert():
+    history = [record(days=0), record(days=30, body="Your free trial converted to a paid plan")]
+    assert evaluate_subscription(history) is None
+
+
+def test_trial_mention_without_conversion_is_not_flagged():
+    assert evaluate_subscription([record(body="Start your free trial today")]) is None
+
+
+def test_price_hike_after_unsteady_history_is_not_flagged():
+    history = [record(amount=80, days=0), record(amount=100, days=30), record(amount=120, days=60)]
+    assert evaluate_subscription(history) is None

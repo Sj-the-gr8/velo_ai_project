@@ -19,6 +19,7 @@ class Settings:
     mock_site_url: str = os.getenv("MOCK_SITE_URL", "http://127.0.0.1:5000")
     agent_max_steps: int = int(os.getenv("AGENT_MAX_STEPS", "8"))
     agent_screenshot_dir: Path = Path(os.getenv("AGENT_SCREENSHOT_DIR", "agent_screenshots"))
+    notify_click_timeout: float = float(os.getenv("NOTIFY_CLICK_TIMEOUT", "120"))
 
 
 settings = Settings()
