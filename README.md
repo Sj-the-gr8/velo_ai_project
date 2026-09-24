@@ -71,6 +71,8 @@ It has two phases:
 | `agent/sandbox.py` | Starts the local mock site for an agent run if it is not already running |
 | `agent/action_log.py` | Writes each agent step to the `agent_actions` table |
 | `scripts/run_pipeline_once.py` | End-to-end Phase 1 run |
+| `scripts/watch_inbox.py` | Runs the pipeline every `POLL_INTERVAL_SECONDS` so new mail is processed as it arrives |
+| `scripts/send_test_notification.py` | Sends one sample alert notification with its buttons; pressing them only prints the choice |
 | `rules/test_trigger_engine.py`, `tests/` | Test suite |
 
 ## Requirements
@@ -118,7 +120,15 @@ What one run does:
 3. **Extract.** Sends the body to `gemini-2.5-flash` with a prompt that treats the email as untrusted input. The JSON reply is validated against `BillingEvent`. Anything that fails parsing or validation is logged and skipped, never guessed.
 4. **Store.** Upserts the subscription by `canonical_id` and inserts the billing event. `message_id` is unique, so re-running is idempotent.
 5. **Evaluate.** After all messages are stored, rebuilds each affected subscription's full history and runs `evaluate_subscription` once per subscription.
-6. **Notify.** Saves any new alert (skipping ones that already have an open alert with the same reason), then shows a desktop notification per alert and waits up to `NOTIFY_CLICK_TIMEOUT` seconds. Clicking one starts the mock site if it is not already running and runs Phase 2 against it. Without a click, nothing runs.
+6. **Notify.** Saves any new alert (skipping ones that already have an open alert with the same reason), then shows a desktop notification per alert and waits up to `NOTIFY_CLICK_TIMEOUT` seconds. Each notification shows the facts behind the alert (old and new price, yearly cost, months charged, next charge date) and has two buttons. **Cancel subscription** starts the mock site if it is not already running and runs Phase 2 against it. **Do nothing** leaves everything as it is. Clicking the body of the notification, or not answering, also does nothing.
+
+### Keep it running on live mail
+
+```bash
+python scripts/watch_inbox.py
+```
+
+The watcher checks Gmail every `POLL_INTERVAL_SECONDS` (default 60) and runs the pipeline on whatever is new. New receipts are extracted, stored, and evaluated, and alerts are notified within about one interval of arriving. Temporary network, Gmail, or Gemini errors are logged and retried on the next check. While a notification is waiting for an answer, or the agent is running, checking pauses and then resumes. Stop it with Ctrl+C.
 
 ### View the dashboard
 
@@ -128,7 +138,7 @@ streamlit run dashboard/app.py --server.address 127.0.0.1
 
 The `--server.address` flag keeps the dashboard on this machine. Streamlit binds to every network interface by default, which would expose your billing data to the local network.
 
-The dashboard is read-only and shows:
+The dashboard is read-only. It re-reads the database every 30 seconds, so mail processed by the watcher appears without a manual refresh. It shows:
 
 - Monthly recurring spend, active subscription count, and open alert count
 - A table of subscriptions with amount, currency, cadence, status, and last seen date
@@ -221,6 +231,7 @@ All settings come from `.env` (see `.env.example`):
 | `AGENT_MAX_STEPS` | `8` | Hard cap on agent steps |
 | `AGENT_SCREENSHOT_DIR` | `agent_screenshots` | Where step screenshots are saved |
 | `NOTIFY_CLICK_TIMEOUT` | `120` | Seconds the pipeline waits for a notification click |
+| `POLL_INTERVAL_SECONDS` | `60` | How often `watch_inbox.py` checks Gmail |
 
 ## Tests
 
@@ -228,13 +239,15 @@ All settings come from `.env` (see `.env.example`):
 pytest -q
 ```
 
-There are 44 tests, and all pass. They cover:
+There are 57 tests, and all pass. They cover:
 
 - Every alert rule, including boundaries: tolerance, cadence, unordered history, precedence, and trial wording
 - MIME parsing: plain-text preference, HTML fallback, attachments, raw Gmail resources
 - Extraction validation: bad JSON, blocked responses, out-of-range amounts, blank merchants, bad dates and currencies, all logged with the message id
+- The Gmail client against a fake service: readonly scope, pagination, oldest-first ordering, and the cursor
+- The watcher retrying transient errors and stopping on unexpected ones
 - The pipeline on synthetic mail: stored rows, cursor advance, idempotent re-runs, out-of-order mail, and the notification-to-agent handoff
-- Notifications: the agent starts only after a click
+- Notifications: alert details, and the agent starting only on **Cancel subscription**, never on **Do nothing**, a body click, or a timeout
 - Schema migration, including adding the `action` column to older databases
 - The agent end-to-end in headless Chromium against the mock site, using a scripted model: recovery from invalid output and unknown labels, a completed cancellation, and the step cap
 

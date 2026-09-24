@@ -20,6 +20,7 @@ class Settings:
     agent_max_steps: int = int(os.getenv("AGENT_MAX_STEPS", "8"))
     agent_screenshot_dir: Path = Path(os.getenv("AGENT_SCREENSHOT_DIR", "agent_screenshots"))
     notify_click_timeout: float = float(os.getenv("NOTIFY_CLICK_TIMEOUT", "120"))
+    poll_interval_seconds: float = float(os.getenv("POLL_INTERVAL_SECONDS", "60"))
 
 
 settings = Settings()

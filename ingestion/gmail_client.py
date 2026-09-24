@@ -1,8 +1,6 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
-from email import policy
-from email.parser import BytesParser
 from pathlib import Path
 
 from google.auth.transport.requests import Request
@@ -10,7 +8,7 @@ from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import build
 
-from ingestion.email_parser import extract_plain_text
+from ingestion.email_parser import parse_gmail_message
 
 SCOPES = ["https://www.googleapis.com/auth/gmail.readonly"]
 
@@ -32,9 +30,26 @@ class GmailClient:
         self.token_file.write_text(credentials.to_json(), encoding="utf-8")
         return build("gmail", "v1", credentials=credentials)
 
+    def read_cursor(self) -> int | None:
+        """Return the internalDate (ms) of the last processed message, if any."""
+        if not self.cursor_file or not self.cursor_file.exists():
+            return None
+        value = float(self.cursor_file.read_text(encoding="utf-8").strip())
+        # Older cursor files stored a seconds timestamp.
+        return int(value * 1000) if value < 1e11 else int(value)
+
+    def save_cursor(self, internal_date: int) -> None:
+        if self.cursor_file:
+            self.cursor_file.write_text(str(internal_date), encoding="utf-8")
+
     def fetch_billing_emails(self, since: datetime | None = None) -> list[dict]:
-        if since is None and self.cursor_file and self.cursor_file.exists():
-            since = datetime.fromtimestamp(float(self.cursor_file.read_text(encoding="utf-8")), timezone.utc)
+        """Return parsed billing-like messages newer than the cursor, oldest first.
+
+        The cursor is not advanced here; the caller saves it once each message is processed.
+        """
+        cursor = self.read_cursor() if since is None else None
+        if cursor is not None:
+            since = datetime.fromtimestamp(cursor / 1000, timezone.utc)
         since = since or datetime.now(timezone.utc) - timedelta(days=90)
         query = f"after:{int(since.timestamp())} (receipt OR invoice OR subscription OR trial)"
         service = self._service()
@@ -44,10 +59,10 @@ class GmailClient:
             result = service.users().messages().list(userId=self.user, q=query, pageToken=page_token, maxResults=100).execute()
             for item in result.get("messages", []):
                 raw = service.users().messages().get(userId=self.user, id=item["id"], format="raw").execute()
-                message = BytesParser(policy=policy.default).parsebytes(__import__("base64").urlsafe_b64decode(raw["raw"]))
-                messages.append({"message_id": item["id"], "received_date": message.get("Date", ""), "body": extract_plain_text(message)})
+                parsed = parse_gmail_message(raw)
+                # after: is second-granular, so drop anything at or before the cursor itself.
+                if cursor is None or parsed["internal_date"] > cursor:
+                    messages.append(parsed)
             page_token = result.get("nextPageToken")
             if not page_token:
-                if self.cursor_file:
-                    self.cursor_file.write_text(str(datetime.now(timezone.utc).timestamp()), encoding="utf-8")
-                return messages
+                return sorted(messages, key=lambda message: message["internal_date"])

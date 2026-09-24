@@ -46,7 +46,8 @@ def test_pipeline_stores_events_raises_alert_and_is_idempotent(test_settings):
     ])
     alerts = run_pipeline_once.run(client=gmail, extractor=fake_extractor, notify=False)
 
-    assert [(name, alert.reason.value) for name, alert in alerts] == [("Acme", "price_hike")]
+    assert [(notice.merchant_name, notice.alert.reason.value) for notice in alerts] == [("Acme", "price_hike")]
+    assert alerts[0].details == "$9.99 to $12.99 a month (+30%), now $155.88 a year. Next charge about 31 Mar 2026."
     assert gmail.cursor == 5
     db = test_settings.database_path
     assert rows(db, "SELECT merchant_name, current_amount, first_seen, last_seen FROM subscriptions ORDER BY merchant_name") == [
@@ -68,10 +69,10 @@ def test_older_mail_does_not_overwrite_current_amount(test_settings):
     assert rows(test_settings.database_path, "SELECT current_amount, first_seen, last_seen FROM subscriptions") == [(12.99, "2026-01-01", "2026-02-01")]
 
 
-def test_notification_click_hands_off_to_agent(test_settings, monkeypatch):
+def test_cancel_choice_hands_off_to_agent(test_settings, monkeypatch):
     calls = []
-    monkeypatch.setattr(run_pipeline_once, "notify_alerts", lambda alerts, on_review, timeout: on_review(*alerts[0]) or True)
-    monkeypatch.setattr(run_pipeline_once, "start_review_agent", lambda merchant, alert: calls.append((merchant, alert.reason.value)))
+    monkeypatch.setattr(run_pipeline_once, "notify_alerts", lambda notices, on_cancel, timeout: on_cancel(notices[0]) or notices[0])
+    monkeypatch.setattr(run_pipeline_once, "start_review_agent", lambda notice: calls.append((notice.merchant_name, notice.alert.reason.value)))
     gmail = FakeGmail([message("m1", 1, "Acme|9.99|2026-01-01"), message("m2", 2, "Acme|19.99|2026-01-31")])
     run_pipeline_once.run(client=gmail, extractor=fake_extractor)
     assert calls == [("Acme", "price_hike")]

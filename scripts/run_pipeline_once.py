@@ -14,20 +14,20 @@ from db.db import Database
 from extraction.llm_extractor import extract_billing_event
 from extraction.schema import BillingEvent
 from ingestion.gmail_client import GmailClient
-from notify.notifier import notify_alerts
-from rules.trigger_engine import Alert, BillingRecord, evaluate_subscription
+from notify.notifier import AlertNotice, describe_alert, notify_alerts
+from rules.trigger_engine import BillingRecord, evaluate_subscription
 
 logger = logging.getLogger(__name__)
 
 
-def start_review_agent(merchant_name: str, alert: Alert) -> None:
-    """Start the sandbox agent only after the user clicks the notification."""
+def start_review_agent(notice: AlertNotice) -> None:
+    """Start the sandbox agent only after the user presses "Cancel subscription"."""
     from agent.sandbox import mock_site
     from agent.vision_agent import run_agent
 
     with mock_site():
         run_id = run_agent()
-    print(f"Sandbox agent run {run_id} finished for {merchant_name} ({alert.reason.value}); see agent_actions.")
+    print(f"Sandbox agent run {run_id} finished for {notice.merchant_name} ({notice.alert.reason.value}); see agent_actions.")
 
 
 def _store_event(database: Database, message: dict, event: BillingEvent) -> int:
@@ -52,10 +52,10 @@ def _store_event(database: Database, message: dict, event: BillingEvent) -> int:
     return subscription["id"]
 
 
-def _evaluate_and_record(database: Database, subscription_id: int) -> tuple[str, Alert] | None:
+def _evaluate_and_record(database: Database, subscription_id: int) -> AlertNotice | None:
     """Run the rules over the full history and save a new alert unless the same one is already open."""
     with database.connection() as connection:
-        merchant_name = connection.execute("SELECT merchant_name FROM subscriptions WHERE id = ?", (subscription_id,)).fetchone()["merchant_name"]
+        subscription = connection.execute("SELECT merchant_name, currency FROM subscriptions WHERE id = ?", (subscription_id,)).fetchone()
         rows = connection.execute("SELECT * FROM billing_events WHERE subscription_id = ? ORDER BY billing_date", (subscription_id,)).fetchall()
         history = [BillingRecord(str(subscription_id), row["amount"], datetime.fromisoformat(row["billing_date"]), row["raw_snippet"]) for row in rows]
         alert = evaluate_subscription(history)
@@ -71,10 +71,11 @@ def _evaluate_and_record(database: Database, subscription_id: int) -> tuple[str,
             "INSERT INTO alerts (subscription_id, reason, created_at) VALUES (?, ?, datetime('now'))",
             (subscription_id, alert.reason.value),
         )
-    return merchant_name, alert
+    return AlertNotice(subscription["merchant_name"], alert, describe_alert(alert, history, subscription["currency"]))
 
 
-def run(client: GmailClient | None = None, extractor=extract_billing_event, notify: bool = True) -> list[tuple[str, Alert]]:
+def run(client: GmailClient | None = None, extractor=extract_billing_event, notify: bool = True, quiet: bool = False) -> list[AlertNotice]:
+    """Process new mail once. ``quiet`` suppresses the summary when there was no new mail (used by the watcher)."""
     database = Database(settings.database_path)
     database.migrate()
     client = client or GmailClient(settings.gmail_credentials_file,
@@ -100,16 +101,21 @@ def run(client: GmailClient | None = None, extractor=extract_billing_event, noti
         client.save_cursor(message["internal_date"])
 
     new_alerts = [result for subscription_id in sorted(affected) if (result := _evaluate_and_record(database, subscription_id))]
-    print(f"Fetched {len(messages)} messages: {stored} billing events stored, {skipped} skipped, {len(new_alerts)} new alerts.")
+    if messages or not quiet:
+        print(f"{datetime.now():%H:%M:%S} Fetched {len(messages)} messages: {stored} billing events stored, {skipped} skipped, {len(new_alerts)} new alerts.")
 
     # Alerts are committed before any notification, so the agent can write to the database.
     if notify and new_alerts:
-        print(f"Waiting up to {settings.notify_click_timeout:.0f}s for a notification click...")
+        for notice in new_alerts:
+            print(f"  {notice.merchant_name}: {notice.details}")
+        print(f"Waiting up to {settings.notify_click_timeout:.0f}s for a decision on the notifications...")
         if not notify_alerts(new_alerts, start_review_agent, timeout=settings.notify_click_timeout):
-            print("No notification was clicked; the agent was not started.")
+            print("Cancel subscription was not chosen; the agent was not started.")
     return new_alerts
 
 
 if __name__ == "__main__":
+    # Currency symbols must not crash a legacy-codepage Windows console.
+    sys.stdout.reconfigure(errors="replace")
     logging.basicConfig(level=logging.INFO)
     run()
