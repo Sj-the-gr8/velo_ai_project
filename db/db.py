@@ -31,6 +31,20 @@ class Database:
             if "action" not in columns:
                 connection.execute("ALTER TABLE agent_actions ADD COLUMN action TEXT")
 
+    def agent_run_outcome(self, run_id: str) -> str | None:
+        """Return the action of a run's final row ("success" or "stopped"), or None if it never finished."""
+        with self.connection() as connection:
+            row = connection.execute(
+                "SELECT action FROM agent_actions WHERE run_id = ? ORDER BY step_number DESC, id DESC LIMIT 1", (run_id,)
+            ).fetchone()
+        return row["action"] if row and row["action"] in ("success", "stopped") else None
+
+    def mark_cancelled(self, subscription_id: int) -> None:
+        """Record a confirmed cancellation: the subscription stops counting as active and its alerts close."""
+        with self.connection() as connection:
+            connection.execute("UPDATE subscriptions SET status = 'cancelled' WHERE id = ?", (subscription_id,))
+            connection.execute("UPDATE alerts SET resolved = 1 WHERE subscription_id = ? AND resolved = 0", (subscription_id,))
+
     def log_agent_action(self, run_id: str, step_number: int, screenshot_path: str, label: str | None, reasoning: str, action: str | None = None) -> None:
         with self.connection() as connection:
             connection.execute(

@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+from google.auth.exceptions import RefreshError
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
@@ -23,7 +24,11 @@ class GmailClient:
     def _service(self):
         credentials = Credentials.from_authorized_user_file(self.token_file, SCOPES) if self.token_file.exists() else None
         if credentials and credentials.expired and credentials.refresh_token:
-            credentials.refresh(Request())
+            try:
+                credentials.refresh(Request())
+            except RefreshError:
+                # Expired or revoked (Google expires Testing-mode tokens after 7 days): sign in again.
+                credentials = None
         if not credentials or not credentials.valid:
             flow = InstalledAppFlow.from_client_secrets_file(self.credentials_file, SCOPES)
             credentials = flow.run_local_server(port=0)

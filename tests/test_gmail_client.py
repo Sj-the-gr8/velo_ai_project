@@ -72,3 +72,32 @@ def test_reads_legacy_seconds_cursor(tmp_path, monkeypatch):
     client = client_with(tmp_path, monkeypatch, FakeGmailService([[]]))
     (tmp_path / "cursor").write_text("1790244261.297622", encoding="utf-8")
     assert client.read_cursor() == 1790244261297
+
+
+def test_expired_refresh_token_falls_back_to_sign_in(tmp_path, monkeypatch):
+    import ingestion.gmail_client as gmail_client
+    from google.auth.exceptions import RefreshError
+
+    class Expired:
+        expired, refresh_token, valid = True, "old", False
+
+        def refresh(self, request):
+            raise RefreshError("invalid_grant: Token has been expired or revoked.")
+
+    class Fresh:
+        valid = True
+
+        def to_json(self):
+            return '{"token": "new"}'
+
+    class Flow:
+        def run_local_server(self, port):
+            return Fresh()
+
+    (tmp_path / "token.json").write_text("{}", encoding="utf-8")
+    monkeypatch.setattr(gmail_client.Credentials, "from_authorized_user_file", lambda *args: Expired())
+    monkeypatch.setattr(gmail_client.InstalledAppFlow, "from_client_secrets_file", lambda *args: Flow())
+    monkeypatch.setattr(gmail_client, "build", lambda *args, **kwargs: "service")
+    client = GmailClient(tmp_path / "secret.json", tmp_path / "token.json")
+    assert client._service() == "service"
+    assert (tmp_path / "token.json").read_text(encoding="utf-8") == '{"token": "new"}'

@@ -27,7 +27,15 @@ def start_review_agent(notice: AlertNotice) -> None:
 
     with mock_site():
         run_id = run_agent()
-    print(f"Sandbox agent run {run_id} finished for {notice.merchant_name} ({notice.alert.reason.value}); see agent_actions.")
+    database = Database(settings.database_path)
+    outcome = database.agent_run_outcome(run_id)
+    if outcome == "success":
+        # Only a confirmed cancellation changes the record; a stopped run leaves it active with the alert open.
+        database.mark_cancelled(int(notice.alert.subscription_id))
+        print(f"Cancelled {notice.merchant_name} (agent run {run_id}). Marked cancelled and its alerts resolved.")
+    else:
+        print(f"Agent run {run_id} for {notice.merchant_name} ended without a cancellation confirmation ({outcome}); "
+              "the subscription stays active. See agent_actions.")
 
 
 def _store_event(database: Database, message: dict, event: BillingEvent) -> int:

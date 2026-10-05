@@ -76,3 +76,34 @@ def test_cancel_choice_hands_off_to_agent(test_settings, monkeypatch):
     gmail = FakeGmail([message("m1", 1, "Acme|9.99|2026-01-01"), message("m2", 2, "Acme|19.99|2026-01-31")])
     run_pipeline_once.run(client=gmail, extractor=fake_extractor)
     assert calls == [("Acme", "price_hike")]
+
+
+def run_cancel_flow(test_settings, monkeypatch, outcome):
+    import agent.sandbox
+    import agent.vision_agent
+    from contextlib import nullcontext
+    from db.db import Database
+
+    gmail = FakeGmail([message("m1", 1, "Acme|9.99|2026-01-01"), message("m2", 2, "Acme|19.99|2026-01-31")])
+    notice = run_pipeline_once.run(client=gmail, extractor=fake_extractor, notify=False)[0]
+
+    def fake_agent():
+        Database(test_settings.database_path).log_agent_action("run-1", 1, "final.png", None, "done", outcome)
+        return "run-1"
+
+    monkeypatch.setattr(agent.sandbox, "mock_site", nullcontext)
+    monkeypatch.setattr(agent.vision_agent, "run_agent", fake_agent)
+    run_pipeline_once.start_review_agent(notice)
+    return test_settings.database_path
+
+
+def test_successful_agent_run_marks_subscription_cancelled(test_settings, monkeypatch):
+    db = run_cancel_flow(test_settings, monkeypatch, "success")
+    assert rows(db, "SELECT status FROM subscriptions") == [("cancelled",)]
+    assert rows(db, "SELECT resolved FROM alerts") == [(1,)]
+
+
+def test_stopped_agent_run_leaves_subscription_active(test_settings, monkeypatch):
+    db = run_cancel_flow(test_settings, monkeypatch, "stopped")
+    assert rows(db, "SELECT status FROM subscriptions") == [("active",)]
+    assert rows(db, "SELECT resolved FROM alerts") == [(0,)]
