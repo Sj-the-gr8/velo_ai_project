@@ -59,10 +59,11 @@ def render() -> None:
     if events.empty:
         st.info("Billing events will appear here after ingestion.")
     else:
-        # Bucket by month so a merchant reads as 0 only in months with no charge, not on every day between charges.
-        month = pd.to_datetime(events["billing_date"]).dt.to_period("M").dt.to_timestamp()
-        chart = events.assign(month=month).pivot_table(index="month", columns="merchant_name", values="amount", aggfunc="sum").fillna(0)
-        st.line_chart(chart)
+        # One point per charge, one line per merchant: shows the price actually charged each time, so a hike reads
+        # as a step up. (Monthly totals misled when two charges fell in the same calendar month.)
+        st.line_chart(events.assign(billing_date=pd.to_datetime(events["billing_date"])),
+                      x="billing_date", y="amount", color="merchant_name",
+                      x_label="Charge date", y_label="Amount charged")
     st.caption(f"Updated {datetime.now():%H:%M:%S}; refreshes every {REFRESH_SECONDS}s.")
 
 
